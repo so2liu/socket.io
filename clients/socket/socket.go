@@ -60,6 +60,9 @@ type Socket struct {
 	// connected indicates whether the socket is currently connected to the server.
 	connected atomic.Bool
 
+	// connectSent indicates whether a namespace CONNECT packet is in flight.
+	connectSent atomic.Bool
+
 	// recovered indicates if the connection state was recovered after reconnection.
 	recovered atomic.Bool
 
@@ -254,12 +257,29 @@ func (s *Socket) Connect() *Socket {
 	if ReadyStateOpen == s.io._readyState.Load() {
 		s.onopen()
 	}
+	s.ensureConnectPacket(0)
 	return s
 }
 
 // Open is an alias for Connect.
 func (s *Socket) Open() *Socket {
 	return s.Connect()
+}
+
+func (s *Socket) ensureConnectPacket(attempt int) {
+	if s.connected.Load() || s.connectSent.Load() || !s.Active() || attempt >= 100 {
+		return
+	}
+	utils.SetTimeout(func() {
+		if s.connected.Load() || s.connectSent.Load() || !s.Active() {
+			return
+		}
+		if ReadyStateOpen == s.io._readyState.Load() {
+			s.onopen()
+			return
+		}
+		s.ensureConnectPacket(attempt + 1)
+	}, 10*time.Millisecond)
 }
 
 // On registers event listeners on the socket.
@@ -500,6 +520,9 @@ func (s *Socket) packet(packet *Packet) {
 
 // onopen is called upon engine `open`.
 func (s *Socket) onopen(...any) {
+	if !s.connectSent.CompareAndSwap(false, true) {
+		return
+	}
 	socketLog.Debug("transport is open - connecting")
 	s._sendConnectPacket(s.auth)
 }
@@ -538,6 +561,7 @@ func (s *Socket) onerror(errs ...any) {
 // description: The error description.
 func (s *Socket) onclose(reason string, description error) {
 	socketLog.Debug("close (%s)", reason)
+	s.connectSent.Store(false)
 	s.connected.Store(false)
 	s.id.Store("")
 	s.EventEmitter.Emit("disconnect", reason, description)
@@ -593,6 +617,7 @@ func (s *Socket) onpacket(packet *parser.Packet) {
 		s.ondisconnect()
 
 	case parser.CONNECT_ERROR:
+		s.connectSent.Store(false)
 		s.destroy()
 		data, _ := packet.Data.(map[string]any)
 		extendedError, err := processExtendedError(data)

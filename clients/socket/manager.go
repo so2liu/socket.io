@@ -361,9 +361,9 @@ func (m *Manager) onopen(socket Engine) {
 
 	// mark as open
 	m._readyState.Store(ReadyStateOpen)
-	m.Emit("open")
 
-	// add new subs
+	// add new subs before emitting open, because socket open handlers may send
+	// packets and receive immediate responses.
 	m.subs.Push(
 		on(socket, "ping", m.onping),
 		on(socket, "data", m.ondata),
@@ -373,6 +373,8 @@ func (m *Manager) onopen(socket Engine) {
 		}),
 		on(m.decoder, "decoded", m.ondecoded),
 	)
+
+	m.Emit("open")
 }
 
 // Called upon a ping.

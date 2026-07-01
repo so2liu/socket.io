@@ -150,7 +150,6 @@ func (s *socket) Construct(id string, server BaseServer, transport transports.Tr
 	}
 
 	s.setTransport(transport)
-	s.onOpen()
 }
 
 // Called upon transport considered open.

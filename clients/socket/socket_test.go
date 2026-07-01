@@ -5,6 +5,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,7 +44,23 @@ func TestConcurrentWebSocketOnlyConnects(t *testing.T) {
 	config.SetTransports(types.NewSet(server.WebSocket))
 
 	httpServer := types.NewWebServer(nil)
-	server.NewServer(httpServer, config)
+	var serverConnections atomic.Int32
+	var engineConnections atomic.Int32
+	var engineData atomic.Int32
+	io := server.NewServer(httpServer, config)
+	_ = io.Engine().On("connection", func(conns ...any) {
+		engineConnections.Add(1)
+		if conn, ok := conns[0].(interface {
+			On(types.EventName, ...types.EventListener) error
+		}); ok {
+			_ = conn.On("data", func(...any) {
+				engineData.Add(1)
+			})
+		}
+	})
+	_ = io.On("connection", func(...any) {
+		serverConnections.Add(1)
+	})
 
 	addr := allocatePort()
 	listening := make(chan struct{})
@@ -60,6 +77,13 @@ func TestConcurrentWebSocketOnlyConnects(t *testing.T) {
 		mu      sync.Mutex
 		sockets []*client.Socket
 	)
+	t.Cleanup(func() {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, socket := range sockets {
+			socket.Close()
+		}
+	})
 
 	for i := range clientCount {
 		go func(i int) {
@@ -85,7 +109,19 @@ func TestConcurrentWebSocketOnlyConnects(t *testing.T) {
 				})
 			}
 			timer := time.AfterFunc(15*time.Second, func() {
-				done(fmt.Errorf("client %d timed out waiting for connect (connected=%t)", i, socket.Connected()))
+				engineState := "<nil>"
+				transportName := "<nil>"
+				transportWritable := false
+				writeBufferLen := -1
+				if engine := socket.Io().Engine(); engine != nil {
+					engineState = string(engine.ReadyState())
+					writeBufferLen = engine.WriteBuffer().Len()
+					if transport := engine.Transport(); transport != nil {
+						transportName = transport.Name()
+						transportWritable = transport.Writable()
+					}
+				}
+				done(fmt.Errorf("client %d timed out waiting for connect (connected=%t active=%t engine=%s transport=%s writable=%t write_buffer=%d engine_connections=%d engine_data=%d server_connections=%d)", i, socket.Connected(), socket.Active(), engineState, transportName, transportWritable, writeBufferLen, engineConnections.Load(), engineData.Load(), serverConnections.Load()))
 			})
 
 			_ = socket.On("connect", func(...any) {
@@ -105,11 +141,6 @@ func TestConcurrentWebSocketOnlyConnects(t *testing.T) {
 		}
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
-	for _, socket := range sockets {
-		socket.Close()
-	}
 }
 
 // ExampleSocket_basic demonstrates the basic usage of Socket.IO client

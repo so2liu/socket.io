@@ -347,17 +347,20 @@ func (bs *baseServer) Handshake(transportName string, ctx *types.HttpContext) (*
 
 	transport.OnRequest(ctx)
 
-	socket := NewSocket(id, bs, transport, ctx, protocol)
+	engineSocket := NewSocket(id, bs, transport, ctx, protocol)
 
-	bs.clients.Store(id, socket)
+	bs.clients.Store(id, engineSocket)
 	bs.clientsCount.Add(1)
 
-	_ = socket.Once("close", func(...any) {
+	_ = engineSocket.Once("close", func(...any) {
 		bs.clients.Delete(id)
 		bs.clientsCount.Add(^uint64(0))
 	})
 
-	bs.Emit("connection", socket)
+	bs.Emit("connection", engineSocket)
+	if s, ok := engineSocket.(*socket); ok {
+		s.onOpen()
+	}
 
 	return nil, transport
 }

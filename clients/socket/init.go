@@ -43,6 +43,10 @@ func lookup(uri string, opts OptionsInterface) (*Socket, error) {
 	if opts == nil {
 		opts = DefaultOptions()
 	}
+	autoConnect := true
+	if opts.GetRawAutoConnect() != nil {
+		autoConnect = opts.AutoConnect()
+	}
 
 	path := "/socket.io"
 	if opts.GetRawPath() != nil {
@@ -62,12 +66,23 @@ func lookup(uri string, opts OptionsInterface) (*Socket, error) {
 	newConnection := opts.ForceNew() || !opts.Multiplex() || sameNamespace
 
 	var io *Manager
+	createdManager := false
 	if newConnection {
 		clientLog.Debug("ignoring socket cache for %s", source)
-		io = NewManager(source, opts)
+		io = newLookupManager(source, opts)
+		createdManager = true
 	} else {
-		manager, ok := cache.LoadOrStore(id, NewManager(source, opts))
+		manager, ok := cache.Load(id)
 		if !ok {
+			manager = newLookupManager(source, opts)
+			actual, loaded := cache.LoadOrStore(id, manager)
+			if loaded {
+				manager = actual
+			} else {
+				createdManager = true
+			}
+		}
+		if createdManager {
 			clientLog.Debug("new io instance for %s", source)
 		}
 		io = manager
@@ -76,7 +91,23 @@ func lookup(uri string, opts OptionsInterface) (*Socket, error) {
 		opts.SetQuery(parsed.Query())
 	}
 
-	return io.Socket(parsed.Path, opts), nil
+	socket := io.Socket(parsed.Path, opts)
+	if createdManager {
+		io._autoConnect = autoConnect
+		io.opts.SetAutoConnect(autoConnect)
+	}
+	if autoConnect {
+		socket.Connect()
+	}
+
+	return socket, nil
+}
+
+func newLookupManager(uri string, opts OptionsInterface) *Manager {
+	managerOpts := DefaultOptions()
+	managerOpts.Assign(opts)
+	managerOpts.SetAutoConnect(false)
+	return NewManager(uri, managerOpts)
 }
 
 // Io returns a Socket instance for the given URI and options.
