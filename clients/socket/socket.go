@@ -262,6 +262,21 @@ func (s *Socket) Open() *Socket {
 	return s.Connect()
 }
 
+// On registers event listeners on the socket.
+func (s *Socket) On(evt types.EventName, listeners ...types.EventListener) error {
+	if err := s.EventEmitter.On(evt, listeners...); err != nil {
+		return err
+	}
+	if evt == "connect" && s.connected.Load() {
+		for _, listener := range listeners {
+			if listener != nil {
+				listener()
+			}
+		}
+	}
+	return nil
+}
+
 // Send sends a `message` event.
 //
 // This method mimics the WebSocket.send() method.

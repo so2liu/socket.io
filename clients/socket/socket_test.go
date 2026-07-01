@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
+	"testing"
 	"time"
 
 	client "github.com/zishang520/socket.io/clients/socket/v3"
@@ -20,6 +22,94 @@ func allocatePort() string {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 	return fmt.Sprintf("127.0.0.1:%d", port)
+}
+
+func waitForPort(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("server did not start listening on %s", addr)
+}
+
+func TestConcurrentWebSocketOnlyConnects(t *testing.T) {
+	config := server.DefaultServerOptions()
+	config.SetTransports(types.NewSet(server.WebSocket))
+
+	httpServer := types.NewWebServer(nil)
+	server.NewServer(httpServer, config)
+
+	addr := allocatePort()
+	listening := make(chan struct{})
+	httpServer.Listen(addr, func() {
+		close(listening)
+	})
+	<-listening
+	waitForPort(t, addr)
+	defer httpServer.Close(nil)
+
+	const clientCount = 50
+	results := make(chan error, clientCount)
+	var (
+		mu      sync.Mutex
+		sockets []*client.Socket
+	)
+
+	for i := range clientCount {
+		go func(i int) {
+			opts := client.DefaultOptions()
+			opts.SetTransports(types.NewSet(client.WebSocket))
+			opts.SetTimeout(15 * time.Second)
+			opts.SetReconnection(false)
+
+			socket, err := client.Connect(fmt.Sprintf("http://%s/", addr), opts)
+			if err != nil {
+				results <- err
+				return
+			}
+
+			mu.Lock()
+			sockets = append(sockets, socket)
+			mu.Unlock()
+
+			var once sync.Once
+			done := func(err error) {
+				once.Do(func() {
+					results <- err
+				})
+			}
+			timer := time.AfterFunc(15*time.Second, func() {
+				done(fmt.Errorf("client %d timed out waiting for connect (connected=%t)", i, socket.Connected()))
+			})
+
+			_ = socket.On("connect", func(...any) {
+				timer.Stop()
+				done(nil)
+			})
+			_ = socket.On("connect_error", func(args ...any) {
+				timer.Stop()
+				done(fmt.Errorf("client %d connect_error: %v", i, args))
+			})
+		}(i)
+	}
+
+	for range clientCount {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, socket := range sockets {
+		socket.Close()
+	}
 }
 
 // ExampleSocket_basic demonstrates the basic usage of Socket.IO client

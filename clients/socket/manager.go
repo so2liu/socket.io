@@ -286,9 +286,13 @@ func (m *Manager) Open(fn func(error)) *Manager {
 	m.engine.Store(&socket)
 	m._readyState.Store(ReadyStateOpening)
 	m.skipReconnect.Store(false)
+	var opened atomic.Bool
 
 	// emit `open`
 	openSubDestroy := on(socket, "open", func(...any) {
+		if !opened.CompareAndSwap(false, true) {
+			return
+		}
 		m.onopen(socket)
 		if fn != nil {
 			fn(nil)
@@ -333,6 +337,12 @@ func (m *Manager) Open(fn func(error)) *Manager {
 	}
 
 	m.subs.Push(openSubDestroy, errorSub)
+	if socket.ReadyState() == engine.SocketStateOpen && opened.CompareAndSwap(false, true) {
+		m.onopen(socket)
+		if fn != nil {
+			fn(nil)
+		}
+	}
 
 	return m
 }

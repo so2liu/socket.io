@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -247,14 +248,12 @@ func (s *socketWithoutUpgrade) Construct(uri string, opts SocketOptionsInterface
 		}
 	}
 
-	s.transports = types.NewSlice[string]()
 	s._transportsByName = map[string]TransportCtor{}
-	if transports := opts.Transports(); transports != nil {
-		for _, transport := range transports.Keys() {
-			transportName := transport.Name()
-			s.transports.Push(transportName)
-			s._transportsByName[transportName] = transport
-		}
+	s.transports = types.NewSlice[string]()
+	for _, transport := range orderedTransportCtors(opts.Transports()) {
+		transportName := transport.Name()
+		s.transports.Push(transportName)
+		s._transportsByName[transportName] = transport
 	}
 
 	s.opts = DefaultSocketOptions()
@@ -307,6 +306,40 @@ func (s *socketWithoutUpgrade) Construct(uri string, opts SocketOptionsInterface
 	}
 
 	s._open()
+}
+
+func orderedTransportCtors(transportSet *types.Set[TransportCtor]) []TransportCtor {
+	if transportSet == nil {
+		return nil
+	}
+
+	byName := map[string]TransportCtor{}
+	for _, transport := range transportSet.Keys() {
+		if transport == nil {
+			continue
+		}
+		byName[transport.Name()] = transport
+	}
+
+	orderedNames := []string{transports.POLLING, transports.WEBSOCKET, transports.WEBTRANSPORT}
+	ordered := make([]TransportCtor, 0, len(byName))
+	for _, name := range orderedNames {
+		if transport, ok := byName[name]; ok {
+			ordered = append(ordered, transport)
+			delete(byName, name)
+		}
+	}
+
+	customNames := make([]string, 0, len(byName))
+	for name := range byName {
+		customNames = append(customNames, name)
+	}
+	sort.Strings(customNames)
+	for _, name := range customNames {
+		ordered = append(ordered, byName[name])
+	}
+
+	return ordered
 }
 
 // CreateTransport initializes a new transport instance with the specified name.
