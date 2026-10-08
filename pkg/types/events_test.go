@@ -269,14 +269,14 @@ func TestConcurrentEmitRemoveListener(t *testing.T) {
 func TestConcurrentEmit(t *testing.T) {
 	emitter := NewEventEmitter()
 	var (
-		counter int32
+		counter atomic.Int32
 		wg      sync.WaitGroup
 	)
 
 	const numListeners = 50
 	for range numListeners {
 		_ = emitter.On("inc", func(...any) {
-			atomic.AddInt32(&counter, 1)
+			counter.Add(1)
 		})
 	}
 
@@ -291,7 +291,7 @@ func TestConcurrentEmit(t *testing.T) {
 	wg.Wait()
 
 	expected := int32(numListeners * numEmits)
-	if actual := atomic.LoadInt32(&counter); actual != expected {
+	if actual := counter.Load(); actual != expected {
 		t.Fatalf("Expected counter %d, got %d", expected, actual)
 	}
 }
@@ -351,5 +351,33 @@ func TestConcurrentRemoveAll(t *testing.T) {
 	// Ensure all listeners are removed
 	if count := emitter.ListenerCount("test"); count != 0 {
 		t.Fatalf("Expected 0 listeners after removal, got %d", count)
+	}
+}
+
+// TestOnceListenerReentrantEmitDoesNotDeadlock reproduces the deadlock where a
+// listener registered with Once re-emits the same event from within its own
+// body: the one-time listener must already be removed before invocation (as in
+// Node.js EventEmitter), otherwise the nested Emit re-enters the listener's
+// sync.Once and deadlocks.
+func TestOnceListenerReentrantEmitDoesNotDeadlock(t *testing.T) {
+	emitter := NewEventEmitter()
+
+	done := make(chan struct{})
+	if err := emitter.Once("evt", func(...any) {
+		// Re-entrant emit from inside the once listener; must be a no-op.
+		// Signal only after it returns, so a deadlock fails the test.
+		emitter.Emit("evt")
+		close(done)
+	}); err != nil {
+		t.Fatalf("failed to register Once listener: %v", err)
+	}
+
+	// Run in a goroutine so a deadlock fails the test instead of hanging it.
+	go emitter.Emit("evt")
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("re-entrant Emit from within a Once listener deadlocked")
 	}
 }

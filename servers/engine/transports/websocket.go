@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"sync"
 	"time"
 
 	ws "github.com/gorilla/websocket"
@@ -24,7 +23,6 @@ type websocket struct {
 	idleTimeout time.Duration
 
 	socket     *types.WebSocketConn
-	mu         sync.Mutex
 	writeQueue *queue.Queue
 }
 
@@ -59,11 +57,10 @@ func (w *websocket) Construct(ctx *types.HttpContext) {
 		w.OnClose()
 	})
 
-	// This goroutine is invoked only once.
-	go w.message()
-
 	w.SetWritable(true)
 	w.SetPerMessageDeflate(nil)
+
+	StartReader(w, ctx.TransportReadPermission(), w.message)
 }
 
 // Transport name
@@ -145,15 +142,14 @@ func (w *websocket) Send(packets []*packet.Packet) {
 	w.SetWritable(false)
 	w.writeQueue.Enqueue(func() { w.send(packets) })
 }
+
+// send runs exclusively on writeQueue, including its completion events.
 func (w *websocket) send(packets []*packet.Packet) {
 	defer func() {
 		w.Emit("drain")
 		w.SetWritable(true)
 		w.Emit("ready")
 	}()
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
 
 	for _, packet := range packets {
 		// always creates a new object since ws modifies it
@@ -223,17 +219,12 @@ func (w *websocket) write(data types.BufferInterface, compress bool) {
 	}
 }
 
-// OnClose tears down the write queue regardless of how the transport
-// reaches the "closed" state. The base Transport.Close() path runs
-// DoClose (which closes the queue), but any close that originates as
-// an error / unexpected peer drop goes straight through OnClose with
-// the state already flipped to "closed" — at which point a follow-up
-// Transport.Close() returns early and DoClose never fires. Without
-// this override the per-socket queue.loop goroutine waits on its
-// sync.Cond forever, leaking once per ungraceful disconnect.
+// OnClose releases the write queue and hijacked connection for every close path,
+// including peer/error closes that bypass DoClose after the state becomes closed.
 func (w *websocket) OnClose() {
 	w.writeQueue.TryClose()
 	w.Transport.OnClose()
+	_ = w.socket.Close()
 }
 
 // Closes the transport.
