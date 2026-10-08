@@ -139,7 +139,10 @@ type (
 		// leaveAll/DelAll runs — preventing orphaned rooms[room] entries.
 		joinMu sync.RWMutex
 
-		taskQueue *queue.Queue
+		taskQueue    *queue.Queue
+		eventQueue   *queue.Queue
+		eventsClosed chan struct{}
+		closeEvents  sync.Once
 	}
 )
 
@@ -153,6 +156,8 @@ func MakeSocket() *Socket {
 		_anyListeners:         types.NewSlice[types.EventListener](),
 		_anyOutgoingListeners: types.NewSlice[types.EventListener](),
 		taskQueue:             queue.New(),
+		eventQueue:            queue.New(),
+		eventsClosed:          make(chan struct{}),
 	}
 	s.flags.Store(&BroadcastFlags{})
 	s.canJoin.Store(true)
@@ -513,10 +518,17 @@ func (s *Socket) onevent(packet *parser.Packet) {
 		socketLog.Debug("attaching ack callback to event")
 		args = append(args, s.ack(*packet.Id))
 	}
-	for _, listener := range s._anyListeners.All() {
-		listener(args...)
-	}
-	s.dispatch(args)
+	s.eventQueue.Enqueue(func() {
+		select {
+		case <-s.eventsClosed:
+			return
+		default:
+		}
+		for _, listener := range s._anyListeners.All() {
+			listener(args...)
+		}
+		s.dispatch(args)
+	})
 }
 
 // Produces an ack callback to emit with an event.
@@ -612,6 +624,8 @@ func (s *Socket) _cleanup() {
 	// Clear pending ack callbacks to prevent memory leaks
 	s.acks.Clear()
 	s.taskQueue.TryClose()
+	s.closeEvents.Do(func() { close(s.eventsClosed) })
+	s.eventQueue.TryClose()
 }
 
 // Enqueue adds a task to the socket's sequential task queue for ordered execution.
@@ -726,21 +740,25 @@ func (s *Socket) Timeout(timeout time.Duration) *Socket {
 }
 
 // Dispatch incoming event to socket listeners.
+// Incoming listeners run in wire order, including asynchronous middleware.
+// Long operations should start a goroutine and return so later stop/cancel events
+// can run. Keep ACK packets on taskQueue so callbacks can complete independently.
 func (s *Socket) dispatch(event []any) {
 	socketLog.Debug("dispatching an event %v", event)
-	s.run(event, func(err error) {
-		s.Enqueue(func() {
-			if err != nil {
-				s._onerror(err)
-				return
-			}
-			if s.Connected() {
-				s.EmitUntyped(slices.TryGetAny[string](event, 0), slices.Slice(event, 1)...)
-			} else {
-				socketLog.Debug("ignore packet received after disconnection")
-			}
-		})
-	})
+	result := make(chan error, 1)
+	var once sync.Once
+	s.run(event, func(err error) { once.Do(func() { result <- err }) })
+	select {
+	case err := <-result:
+		if err != nil {
+			s._onerror(err)
+			return
+		}
+		if s.Connected() {
+			s.EmitUntyped(slices.TryGetAny[string](event, 0), slices.Slice(event, 1)...)
+		}
+	case <-s.eventsClosed:
+	}
 }
 
 // Use registers a middleware function for this socket.
@@ -760,6 +778,11 @@ func (s *Socket) run(event []any, fn func(error)) {
 		var run func(i int)
 		run = func(i int) {
 			fns[i](event, func(err error) {
+				select {
+				case <-s.eventsClosed:
+					return
+				default:
+				}
 				// upon error, short-circuit
 				if err != nil {
 					fn(err)
