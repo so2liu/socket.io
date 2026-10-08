@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/zishang520/socket.io/parsers/socket/v3/parser"
 	"github.com/zishang520/socket.io/v3/pkg/types"
 )
 
@@ -210,4 +211,28 @@ func (c *orderWire) read() string {
 	result := c.pending[0]
 	c.pending = c.pending[1:]
 	return result
+}
+
+func TestDisconnectSkipsQueuedMiddleware(t *testing.T) {
+	s := MakeSocket()
+	defer s.taskQueue.Close()
+	nextReady := make(chan func(error), 1)
+	anyCalls, laterCalls := 0, 0
+	s.OnAny(func(...any) { anyCalls++ })
+	s.Use(func(_ []any, next func(error)) { nextReady <- next })
+	s.Use(func(_ []any, next func(error)) { laterCalls++; next(nil) })
+	s.onevent(&parser.Packet{Data: []any{"held"}})
+	s.onevent(&parser.Packet{Data: []any{"queued"}})
+	var next func(error)
+	select {
+	case next = <-nextReady:
+	case <-time.After(time.Second):
+		t.Fatal("middleware not entered")
+	}
+	close(s.eventsClosed)
+	s.eventQueue.Close()
+	next(nil)
+	if anyCalls != 1 || laterCalls != 0 {
+		t.Fatalf("listeners after close: OnAny=%d, later middleware=%d", anyCalls, laterCalls)
+	}
 }

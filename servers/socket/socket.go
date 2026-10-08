@@ -519,6 +519,11 @@ func (s *Socket) onevent(packet *parser.Packet) {
 		args = append(args, s.ack(*packet.Id))
 	}
 	s.eventQueue.Enqueue(func() {
+		select {
+		case <-s.eventsClosed:
+			return
+		default:
+		}
 		for _, listener := range s._anyListeners.All() {
 			listener(args...)
 		}
@@ -773,6 +778,11 @@ func (s *Socket) run(event []any, fn func(error)) {
 		var run func(i int)
 		run = func(i int) {
 			fns[i](event, func(err error) {
+				select {
+				case <-s.eventsClosed:
+					return
+				default:
+				}
 				// upon error, short-circuit
 				if err != nil {
 					fn(err)
